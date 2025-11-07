@@ -97,7 +97,11 @@ def load_dataframe_from_file(file_id: str) -> pd.DataFrame:
 # MCP Tool Definitions
 @mcp.tool()
 def load_file(file_id: Annotated[str, Field(description="The Google Drive file ID to download and load into memory")]) -> dict:
-    """Download a file from Google Drive and load it into memory. Supports xlsx, csv, and Google Sheets files."""
+    """Download a file from Google Drive and load it into memory for analysis.
+    
+    Supports Excel files (.xlsx, .xls), CSV files (.csv), and Google Sheets.
+    Must be called before any other operations on the file.
+    """
     # Check if already loaded
     if file_id in loaded_dataframes:
         return {
@@ -130,7 +134,10 @@ def load_file(file_id: Annotated[str, Field(description="The Google Drive file I
 
 @mcp.tool()
 def unload_file(file_id: Annotated[str, Field(description="The Google Drive file ID to remove from local storage and memory")]) -> str:
-    """Delete a previously downloaded file from local storage and clear it from memory."""
+    """Remove a file from local storage and free up memory.
+    
+    Does not affect the original file in Google Drive.
+    """
     download_dir = settings.get_download_directory_path()
     
     # Clear DataFrame from memory
@@ -151,7 +158,13 @@ def unload_file(file_id: Annotated[str, Field(description="The Google Drive file
 
 @mcp.tool()
 def info(file_id: Annotated[str, Field(description="The Google Drive file ID to retrieve information about")]) -> dict:
-    """Get metadata about a loaded file including shape, columns, data types, and null counts."""
+    """Get metadata and statistics about a loaded file.
+    
+    Returns shape (rows and columns), column names with data types,
+    and null/non-null counts for each column.
+    
+    Use this before writing SQL queries to know available columns.
+    """
     # Load the file into DataFrame if not already loaded
     if file_id not in loaded_dataframes:
         loaded_dataframes[file_id] = load_dataframe_from_file(file_id)
@@ -188,10 +201,17 @@ def info(file_id: Annotated[str, Field(description="The Google Drive file ID to 
 @mcp.tool()
 def get_rows_csv(
     file_id: Annotated[str, Field(description="The Google Drive file ID to retrieve rows from")],
-    start: Annotated[int, Field(description="Starting row index (0-based, inclusive)")] = 0,
+    start: Annotated[int | None, Field(description="Starting row index (0-based, inclusive)")] = None,
     end: Annotated[int | None, Field(description="Ending row index (exclusive). If not specified, returns all rows from start")] = None
 ) -> dict:
-    """Get a range of rows from a loaded file in CSV format."""
+    """Retrieve a range of rows from a loaded file as CSV-formatted text.
+    
+    Returns rows as CSV with column headers. Uses zero-based indexing where
+    end is exclusive (like Python slicing). If start or end is not specified, returns
+    all rows from the start of the file or to the end of the file.
+    
+    Example: start=0, end=10 returns the first 10 rows.
+    """
     # Load the file into DataFrame if not already loaded
     if file_id not in loaded_dataframes:
         loaded_dataframes[file_id] = load_dataframe_from_file(file_id)
@@ -200,7 +220,7 @@ def get_rows_csv(
     
     try:
         # Validate start index
-        if start < 0:
+        if start < 0 or start is None:
             start = 0
         
         # Default end to number of rows if not specified
@@ -243,10 +263,19 @@ def get_rows_csv(
 
 @mcp.tool()
 def query_file(
-    file_id: str = Field(..., description="The Google Drive file ID to query"),
-    sql_query: str = Field(..., description="SQL query to execute (use 'data' as the table name)")
+    file_id: Annotated[str, Field(description="The Google Drive file ID to query")],
+    sql_query: Annotated[str, Field(description="SQL query to execute (use 'data' as the table name)")]
 ) -> dict:
-    """Execute a SQL query on a loaded file using DuckDB."""
+    """Execute SQL queries on a loaded file.
+    
+    Supports full SQL syntax (SELECT, WHERE, JOIN, GROUP BY, ORDER BY, etc.).
+    Results are returned as structured data with columns and rows arrays.
+    Only read operations are supported.
+
+    Always reference the table as 'data' (e.g., "SELECT * FROM data").
+    Column names are case-sensitive and match the file's column headers.
+    Use LIMIT clause to control the number of returned rows.
+    """
     # Load the file into DataFrame if not already loaded
     if file_id not in loaded_dataframes:
         loaded_dataframes[file_id] = load_dataframe_from_file(file_id)

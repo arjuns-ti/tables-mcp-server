@@ -1,0 +1,111 @@
+name: Publish to MCP Hive
+
+on:
+  push:
+    branches: [main]
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      force_publish:
+        description: "Force publish even if not a release"
+        required: false
+        default: false
+        type: boolean
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    env:
+      MCP_SERVER_URL: https://mcp-hive.ti.trilogy.com
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Verify required secrets
+        run: |
+          [ -n "${{ secrets.MCP_HIVE_API_KEY }}" ] || { echo "❌ MCP_HIVE_API_KEY missing"; exit 1; }
+          [ -n "${{ secrets.MCP_HIVE_ID }}" ] || { echo "❌ MCP_HIVE_ID missing"; exit 1; }
+          [ -n "${{ secrets.OAUTH_CLIENT_ID }}" ] || { echo "❌ OAUTH_CLIENT_ID missing"; exit 1; }
+          [ -n "${{ secrets.OAUTH_CLIENT_SECRET }}" ] || { echo "❌ OAUTH_CLIENT_SECRET missing"; exit 1; }
+          echo "✅ All required secrets are present"
+
+      - name: Get version from pyproject.toml
+        id: get_version
+        run: |
+          python -c "import tomllib,sys;print(tomllib.load(open('pyproject.toml','rb'))['project']['version'])" | tee version.txt
+          echo "version=$(cat version.txt)" >> $GITHUB_OUTPUT
+          echo "📋 Found version: $(cat version.txt)"
+
+      - name: Create custom payload file
+        run: |
+          REPO_URL="${{ github.server_url }}/${{ github.repository }}"
+          cat > custom_payload.json << JSON
+          {
+            "hiveName": "Tables MCP",
+            "hiveDescription": "Model Context Protocol server for loading, querying, and analyzing tabular data files from Google Drive using SQL",
+            "version": "${{ steps.get_version.outputs.version }}",
+            "tags": ["google-drive", "tables", "sql", "duckdb", "spreadsheets", "csv", "data-analysis", "pandas"],
+            "homePage": "${REPO_URL}",
+            "securitySchemes": [
+              {
+                "id": "oauth2",
+                "type": "oauth2",
+                "flows": {
+                  "authorizationCode": {
+                    "authorizationUrl": "https://accounts.google.com/o/oauth2/v2/auth",
+                    "tokenUrl": "https://oauth2.googleapis.com/token",
+                    "scopes": {
+                      "https://www.googleapis.com/auth/drive.readonly": "Read files from Google Drive",
+                      "https://www.googleapis.com/auth/drive.file": " Read and write files from Google Drive"
+                    }
+                  }
+                }
+              }
+            ],
+            "oAuthClient": {
+              "clientId": "${{ secrets.OAUTH_CLIENT_ID }}",
+              "clientSecret": "${{ secrets.OAUTH_CLIENT_SECRET }}"
+            }
+          }
+          JSON
+          echo "📋 Custom payload:"; cat custom_payload.json
+
+      - name: Create ZIP for MCP Hive
+        run: |
+          ZIP_PATH="../tables-mcp-server.zip"
+          zip -r "$ZIP_PATH" . \
+            -x "*.git*" \
+            "*/__pycache__/*" \
+            "*.DS_Store" \
+            "credentials/client_secrets.json" \
+            ".gcp-saved-tokens.json" \
+            "downloads/*" \
+            "build/*" \
+            "*.egg-info/*" \
+            ".venv/*" \
+            ".ruff_cache/*"
+          echo "📦 Created zip: $ZIP_PATH"; ls -la "$ZIP_PATH"
+
+      - name: Publish to MCP Hive
+        env:
+          API_KEY: ${{ secrets.MCP_HIVE_API_KEY }}
+          HIVE_ID: ${{ secrets.MCP_HIVE_ID }}
+        run: |
+          ZIP_PATH="../tables-mcp-server.zip"
+          CONFIG_JSON=$(jq -c '.' custom_payload.json)
+          curl -sS -X PUT "$MCP_SERVER_URL/api/hives/$HIVE_ID/from-mcp-server" \
+            -H "x-api-key: $API_KEY" \
+            -F "zipFile=@${ZIP_PATH};type=application/zip" \
+            --form-string "data=${CONFIG_JSON}"
+          echo "\n✅ Publish request sent"
+
+      - name: Done
+        run: |
+          echo "🎉 Successfully initiated publish to MCP Hive"
