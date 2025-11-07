@@ -1,7 +1,5 @@
 """Google Drive Authentication - OAuth 2.0 flow with automatic token refresh"""
 
-import json
-import logging
 import os
 from pathlib import Path
 from typing import Optional
@@ -13,8 +11,6 @@ from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 
 from src.config import Settings
-
-logger = logging.getLogger(__name__)
 
 
 class GoogleDriveAuthError(Exception):
@@ -58,33 +54,25 @@ class GoogleDriveClient:
             
             # Check if we have saved credentials
             if token_file.exists():
-                logger.info(f"Loading saved credentials from {token_file}")
                 try:
                     self.credentials = Credentials.from_authorized_user_file(
                         str(token_file),
                         scopes=self.settings.google_drive_api_scopes
                     )
-                    logger.info("Credentials loaded successfully")
-                except Exception as e:
-                    logger.warning(f"Failed to load credentials: {e}")
+                except Exception:
                     self.credentials = None
             
             # Automatically refresh expired tokens
             if self.credentials and self.credentials.expired and self.credentials.refresh_token:
-                logger.info("Credentials expired, refreshing automatically...")
                 try:
                     self.credentials.refresh(Request())
-                    logger.info("✅ Credentials refreshed successfully (automatic, no user intervention)")
                     # Save the refreshed credentials
                     self._save_credentials()
-                except Exception as e:
-                    logger.error(f"Failed to refresh credentials: {e}")
-                    logger.info("Will need to re-authenticate")
+                except Exception:
                     self.credentials = None
             
             # If we have valid credentials, we're done
             if self.credentials and self.credentials.valid:
-                logger.info("Using valid credentials")
                 return self.credentials
             
             # Need to authenticate - only happens on first run or if refresh failed
@@ -92,8 +80,6 @@ class GoogleDriveClient:
                 raise GoogleDriveAuthError(
                     "No valid credentials available and interactive mode is disabled"
                 )
-            
-            logger.info("No valid credentials found, starting OAuth flow...")
             
             # Check if client config exists
             if not client_config.exists():
@@ -104,9 +90,6 @@ class GoogleDriveClient:
                 )
             
             # Run OAuth flow
-            logger.info("Opening browser for OAuth authentication...")
-            logger.info(f"Using OAuth port: {self.settings.google_oauth_port}")
-            
             flow = InstalledAppFlow.from_client_secrets_file(
                 str(client_config),
                 scopes=self.settings.google_drive_api_scopes
@@ -118,8 +101,6 @@ class GoogleDriveClient:
                 success_message="Authentication successful! You can close this window.",
                 open_browser=True
             )
-            
-            logger.info("✅ OAuth authentication successful")
             
             # Save credentials for future use
             self._save_credentials()
@@ -135,7 +116,6 @@ class GoogleDriveClient:
         """Save credentials to disk for future use"""
         try:
             token_file = self.settings.get_token_file_path()
-            logger.info(f"Saving credentials to {token_file}")
             
             # Ensure parent directory exists
             token_file.parent.mkdir(parents=True, exist_ok=True)
@@ -143,11 +123,9 @@ class GoogleDriveClient:
             # Save credentials as JSON
             with open(token_file, 'w') as token:
                 token.write(self.credentials.to_json())
-            
-            logger.info("✅ Credentials saved successfully")
-        except Exception as e:
-            logger.error(f"Failed to save credentials: {e}")
+        except Exception:
             # Don't raise - this is not critical, user can re-auth next time
+            pass
     
     def get_service(self):
         """Get or create the Google Drive API service
@@ -161,12 +139,9 @@ class GoogleDriveClient:
         try:
             if self.service is None:
                 if self.credentials is None:
-                    logger.info("No credentials available, authenticating...")
                     self.authenticate()
                 
-                logger.info("Building Google Drive API service...")
                 self.service = build('drive', 'v3', credentials=self.credentials)
-                logger.info("✅ Google Drive API service ready")
             
             return self.service
             
@@ -183,13 +158,10 @@ class GoogleDriveClient:
             service = self.get_service()
             # Try to list 1 file as a connection test
             service.files().list(pageSize=1).execute()
-            logger.info("✅ Google Drive connection test successful")
             return True
-        except HttpError as e:
-            logger.error(f"Connection test failed (HTTP {e.resp.status}): {e}")
+        except HttpError:
             return False
-        except Exception as e:
-            logger.error(f"Connection test failed: {e}")
+        except Exception:
             return False
 
 
@@ -217,8 +189,6 @@ def setup_google_drive_client(settings: Settings = None, interactive: bool = Tru
             from src.config import get_settings
             settings = get_settings()
         
-        logger.info("Setting up Google Drive client...")
-        
         # Create client
         client = GoogleDriveClient(settings)
         
@@ -229,7 +199,6 @@ def setup_google_drive_client(settings: Settings = None, interactive: bool = Tru
         if not client.test_connection():
             raise GoogleDriveAuthError("Authentication succeeded but connection test failed")
         
-        logger.info("✅ Google Drive client ready")
         return client
         
     except GoogleDriveAuthError:

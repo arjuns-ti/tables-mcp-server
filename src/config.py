@@ -54,12 +54,6 @@ class Settings(BaseSettings):
         description="Maximum file size in MB to download (0 for no limit)"
     )
 
-    # Logging Config
-    logging_level: str = Field(
-        "INFO",
-        description="The logging level to use for the server"
-    )
-
     model_config = ConfigDict(
         env_file=".env",
         env_file_encoding="utf-8",

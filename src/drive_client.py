@@ -1,14 +1,10 @@
 """Google Drive Client - File operations for loading and unloading files"""
 
-import logging
-
 from googleapiclient.errors import HttpError
 from googleapiclient.http import MediaIoBaseDownload
 
 from src.auth import GoogleDriveClient
 from src.config import Settings
-
-logger = logging.getLogger(__name__)
 
 
 class DriveOperations:
@@ -81,8 +77,6 @@ class DriveOperations:
         mime_type = file_metadata.get('mimeType', 'unknown')
         file_size = int(file_metadata.get('size', 0))
         
-        logger.info(f"Downloading file: {original_name} (ID: {file_id}, MIME: {mime_type})")
-        
         # Determine file extension based on MIME type
         extension = self._get_extension_from_name_or_mime(original_name, mime_type)
         
@@ -117,11 +111,6 @@ class DriveOperations:
             done = False
             while not done:
                 status, done = downloader.next_chunk()
-                if status:
-                    progress = int(status.progress() * 100)
-                    logger.debug(f"Download progress: {progress}%")
-        
-        logger.info(f"File downloaded successfully to: {destination_path}")
     
     def _get_extension_from_name_or_mime(self, name: str, mime_type: str) -> str:
         """Determine file extension from filename or MIME type"""
@@ -147,8 +136,6 @@ class DriveOperations:
         Raises:
             Exception: If export fails
         """
-        logger.info(f"Exporting Google Sheet as xlsx: {original_name}")
-        
         # Build export request parameters
         export_params = {
             'fileId': file_id,
@@ -166,9 +153,4 @@ class DriveOperations:
             done = False
             while not done:
                 status, done = downloader.next_chunk()
-                if status:
-                    progress = int(status.progress() * 100)
-                    logger.debug(f"Export progress: {progress}%")
-        
-        logger.info(f"Google Sheet exported successfully to: {destination_path}")
 
