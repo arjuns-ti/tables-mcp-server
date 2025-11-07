@@ -1,82 +1,133 @@
 # Tables MCP Server
 
-A Python MCP server for Google Drive file management with automatic token refresh.
-
-## Features
-
-- ✅ List, search, and download files from Google Drive
-- ✅ Support for Shared Drives (Team Drives)
-- ✅ **Automatic token refresh** - no manual re-authentication needed
-- ✅ File size limits and download management
+A Model Context Protocol (MCP) server that enables AI assistants to load, query, and analyze tabular data files from Google Drive. Load spreadsheets and CSV files, run SQL queries with DuckDB, and work with data in-memory using pandas.
 
 ## Quick Setup
 
-1. **Install dependencies**
-   ```bash
-   pip install -e .
-   ```
+### 1. Install dependencies
 
-2. **Set up Google Cloud OAuth**
-   - Go to [Google Cloud Console](https://console.cloud.google.com/)
-   - Enable Google Drive API
-   - Create OAuth Desktop App credentials
-   - Download JSON and save as `credentials/client_secrets.json`
+Using uv (recommended):
+```bash
+uv sync
+```
 
-3. **Configure environment**
-   ```bash
-   cp env.example .env
-   ```
+### 2. Set up Google Cloud OAuth
 
-4. **Run the server**
-   ```bash
-   python main.py
-   ```
-   - First run: Browser opens for Google authentication
-   - Subsequent runs: Uses saved tokens (auto-refreshes when expired)
+1. Go to [Google Cloud Console](https://console.cloud.google.com/)
+2. Create a new project or select an existing one
+3. Enable the **Google Drive API**
+4. Go to **Credentials** → **Create Credentials** → **OAuth client ID**
+5. Choose **Desktop app** as the application type
+6. Download the JSON file and save it as `credentials/client_secrets.json`
+
+### 3. Configure environment
+
+```bash
+cp env.example .env
+```
+
+Edit `.env` to customize settings (optional - defaults work for most cases).
+
+### 4. Run the server
+
+First-time setup (authenticates with Google):
+```bash
+uv run python main.py
+```
+- Browser opens for Google authentication
+- Grants access to Google Drive
+- Saves tokens for future use
+
+Run with MCP Inspector for testing:
+```bash
+uv run mcp dev main.py
+```
+
+**Note:** Run `python main.py` once first to complete authentication before using `mcp dev`.
 
 ## Available MCP Tools
 
-- `list_drive_files` - List files from Drive
-- `search_drive_files` - Search by filename
-- `download_drive_file` - Download a file
-- `get_file_info` - Get file metadata
-- `list_shared_drives` - List Shared Drives
-- `ping` - Check connection
+### `load_file`
+Download and load a file from Google Drive (background operation).
 
-## Token Management
+**Parameters:**
+- `file_id` (string): The Google Drive file ID to download
 
-**Automatic refresh** - no user intervention required:
-- Access tokens refresh automatically when expired (~1 hour)
-- Refresh tokens valid for 6+ months
-- Re-authentication only needed if refresh token expires or is revoked
+**Returns:** Dictionary with file_id, status, and message
 
-## Configuration
-
-Edit `.env` to customize:
-```bash
-GOOGLE_OAUTH_PORT=8765
-DOWNLOAD_DIRECTORY=downloads
-MAX_FILE_SIZE_MB=100
-ENABLE_SHARED_DRIVES=true
-LOGGING_LEVEL=INFO  # DEBUG, INFO, WARNING, ERROR, CRITICAL
+**Example:**
+```python
+load_file("1KliqOOx9hdU6fOJ0oQznuctvF3AphcJU")
+# → {file_id: "...", status: "downloading", message: "Download started..."}
 ```
 
-Logs are automatically saved to `logs.txt`
+### `info`
+Get metadata about a loaded file's DataFrame structure.
 
-## Troubleshooting
+**Parameters:**
+- `file_id` (string): The Google Drive file ID
 
-**Authentication issues:**
-```bash
-rm .gcp-saved-tokens.json
-python main.py
+**Returns:** Shape, columns, data types, null counts, memory usage
+
+**Example:**
+```python
+info("1KliqOOx9hdU6fOJ0oQznuctvF3AphcJU")
+# Returns: {status, file_id, shape: {rows, columns}, columns: [{name, dtype, non_null_count, null_count}], memory_usage_bytes}
 ```
 
-**Port in use:** Change `GOOGLE_OAUTH_PORT` in `.env`
+### `get_rows_csv`
+Export rows from a loaded file as CSV format.
 
-## Security
+**Parameters:**
+- `file_id` (string): The Google Drive file ID
+- `start` (int, optional): Starting row index (0-based, default: 0)
+- `end` (int, optional): Ending row index (exclusive, default: all rows)
 
-Never commit (already in `.gitignore`):
-- `credentials/client_secrets.json`
-- `.gcp-saved-tokens.json`
-- `.env`
-- `logs.txt`
+**Returns:** CSV string with specified rows
+
+**Examples:**
+```python
+# Get all rows
+get_rows_csv("1KliqOOx9hdU6fOJ0oQznuctvF3AphcJU")
+
+# Get first 100 rows
+get_rows_csv("1KliqOOx9hdU6fOJ0oQznuctvF3AphcJU", 0, 100)
+
+# Get rows 50-150
+get_rows_csv("1KliqOOx9hdU6fOJ0oQznuctvF3AphcJU", 50, 150)
+```
+
+### `query_file`
+Run SQL queries on loaded files using DuckDB.
+
+**Parameters:**
+- `file_id` (string): The Google Drive file ID
+- `sql_query` (string): SQL query to execute (use 'data' as the table name)
+
+**Returns:** Query results with columns and rows
+
+**Examples:**
+```python
+# Select all rows
+query_file("1KliqOOx9hdU6fOJ0oQznuctvF3AphcJU", "SELECT * FROM data LIMIT 10")
+
+# Aggregation query
+query_file("1KliqOOx9hdU6fOJ0oQznuctvF3AphcJU", "SELECT column1, COUNT(*) as count FROM data GROUP BY column1")
+
+# Filter query
+query_file("1KliqOOx9hdU6fOJ0oQznuctvF3AphcJU", "SELECT * FROM data WHERE column1 > 100 ORDER BY column2 DESC")
+```
+
+### `unload_file`
+Remove a downloaded file from local storage and clear from memory.
+
+**Parameters:**
+- `file_id` (string): The Google Drive file ID to unload
+
+**Returns:** Success message (idempotent - succeeds even if file doesn't exist)
+
+**Example:**
+```python
+unload_file("1KliqOOx9hdU6fOJ0oQznuctvF3AphcJU")
+# → "File 1KliqOOx9hdU6fOJ0oQznuctvF3AphcJU was unloaded successfully"
+```
