@@ -13,6 +13,11 @@ class Settings(BaseSettings):
     """Settings for the Tables MCP Server - Google Drive Integration"""
 
     # Google Cloud Config
+    use_desktop_oauth: bool = Field(
+        False,
+        description="Use desktop OAuth credentials (client_secret_desktop.json) instead of web credentials"
+    )
+    
     google_client_config: str = Field(
         "credentials/client_secrets.json",
         description="The path to the Google OAuth client secrets JSON file",
@@ -54,6 +59,12 @@ class Settings(BaseSettings):
         description="Maximum file size in MB to download (0 for no limit)"
     )
 
+    # Logging Configuration
+    enable_logging: bool = Field(
+        False,
+        description="Enable logging to file (logs.txt)"
+    )
+
     model_config = ConfigDict(
         env_file=".env",
         env_file_encoding="utf-8",
@@ -62,7 +73,9 @@ class Settings(BaseSettings):
     )
 
     def get_client_config_path(self) -> Path:
-        """Get the client config path"""
+        """Get the client config path based on OAuth type"""
+        if self.use_desktop_oauth:
+            return Path("credentials/client_secret_desktop.json")
         return Path(self.google_client_config)
 
     def get_token_file_path(self) -> Path:
