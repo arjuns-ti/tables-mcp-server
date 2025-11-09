@@ -14,6 +14,15 @@ from mcp.server.fastmcp import FastMCP
 from src.config import get_settings
 from src.drive_client import DriveOperations
 from src.auth import setup_google_drive_client, GoogleDriveAuthError
+from src.models import (
+    LoadFileResponse,
+    InfoResponse,
+    GetRowsCsvResponse,
+    QueryFileResponse,
+    ColumnInfo,
+    ShapeInfo,
+    SheetInfo
+)
 
 
 # Custom file handler that flushes immediately for real-time logging
@@ -190,7 +199,7 @@ def load_dataframe_from_file(file_id: str) -> Dict:
 
 # MCP Tool Definitions
 @mcp.tool()
-def load_file(file_id: Annotated[str, Field(description="The Google Drive file ID to download and load into memory")]) -> dict:
+def load_file(file_id: Annotated[str, Field(description="The Google Drive file ID to download and load into memory")]) -> LoadFileResponse:
     """Download a file from Google Drive and load it into memory for analysis.
     
     Supports Excel files (.xlsx, .xls), CSV files (.csv), and Google Sheets.
@@ -201,11 +210,11 @@ def load_file(file_id: Annotated[str, Field(description="The Google Drive file I
     # Check if already loaded
     if file_id in loaded_files:
         logger.info(f"File {file_id} is already loaded in memory")
-        return {
-            "file_id": file_id,
-            "status": "already loaded",
-            "message": "File is already loaded and ready to use."
-        }
+        return LoadFileResponse(
+            file_id=file_id,
+            status="already loaded",
+            message="File is already loaded and ready to use."
+        )
     
     # Validate file exists on Google Drive
     try:
@@ -234,11 +243,11 @@ def load_file(file_id: Annotated[str, Field(description="The Google Drive file I
         else:
             logger.warning(f"Download completed but file not found in {download_dir}")
         
-        return {
-            "file_id": file_id,
-            "status": "success",
-            "message": "File downloaded successfully and ready to use."
-        }
+        return LoadFileResponse(
+            file_id=file_id,
+            status="success",
+            message="File downloaded successfully and ready to use."
+        )
     except Exception as e:
         logger.error(f"Failed to download file {file_id}: {e}")
         raise Exception(f"Failed to download file {file_id}: {e}")
@@ -275,7 +284,7 @@ def unload_file(file_id: Annotated[str, Field(description="The Google Drive file
 
 
 @mcp.tool()
-def info(file_id: Annotated[str, Field(description="The Google Drive file ID to retrieve information about")]) -> dict:
+def info(file_id: Annotated[str, Field(description="The Google Drive file ID to retrieve information about")]) -> InfoResponse:
     """Get metadata and statistics about a loaded file.
     
     Returns shape (rows and columns), column names with data types,
@@ -306,37 +315,38 @@ def info(file_id: Annotated[str, Field(description="The Google Drive file ID to 
             sheet_memory = int(df.memory_usage(deep=True).sum())
             total_memory += sheet_memory
             
-            sheet_info = {
-                "sheet_number": sheet_num,
-                "sheet_name": sheet_names[sheet_num],
-                "shape": {
-                    "rows": int(df.shape[0]),
-                    "columns": int(df.shape[1])
-                },
-                "columns": [
-                    {
-                        "name": str(col),
-                        "dtype": str(df[col].dtype),
-                        "non_null_count": int(df[col].count()),
-                        "null_count": int(df[col].isna().sum())
-                    }
-                    for col in df.columns
-                ],
-                "memory_usage_bytes": sheet_memory
-            }
+            columns_info = [
+                ColumnInfo(
+                    name=str(col),
+                    dtype=str(df[col].dtype),
+                    non_null_count=int(df[col].count()),
+                    null_count=int(df[col].isna().sum())
+                )
+                for col in df.columns
+            ]
+            
+            sheet_info = SheetInfo(
+                sheet_number=sheet_num,
+                sheet_name=sheet_names[sheet_num],
+                shape=ShapeInfo(
+                    rows=int(df.shape[0]),
+                    columns=int(df.shape[1])
+                ),
+                columns=columns_info,
+                memory_usage_bytes=sheet_memory
+            )
             sheets_info.append(sheet_info)
         
-        info_dict = {
-            "status": "ready",
-            "file_id": file_id,
-            "num_sheets": len(sheets_dict),
-            # "empty_sheets": empty_sheets,
-            "sheets": sheets_info,
-            "total_memory_usage_bytes": total_memory
-        }
+        info_response = InfoResponse(
+            status="ready",
+            file_id=file_id,
+            num_sheets=len(sheets_dict),
+            sheets=sheets_info,
+            total_memory_usage_bytes=total_memory
+        )
         
         logger.info(f"Successfully retrieved info for file {file_id}: {len(sheets_dict)} sheet(s)")
-        return info_dict
+        return info_response
         
     except Exception as e:
         logger.error(f"Failed to retrieve info for file {file_id}: {e}")
@@ -349,7 +359,7 @@ def get_rows_csv(
     start: Annotated[int | None, Field(description="Starting row index (0-based, inclusive)")] = None,
     end: Annotated[int | None, Field(description="Ending row index (exclusive). If not specified, returns all rows from start")] = None,
     sheet_number: Annotated[int, Field(description="Sheet number to retrieve rows from (0-based index). Defaults to 0")] = 0
-) -> dict:
+) -> GetRowsCsvResponse:
     """Retrieve a range of rows from a loaded file as CSV-formatted text.
     
     Returns rows as CSV with column headers. Uses zero-based indexing where
@@ -403,16 +413,16 @@ def get_rows_csv(
         
         # Ensure start is not after end
         if start >= end:
-            return {
-                "status": "success",
-                "file_id": file_id,
-                "sheet_number": sheet_number,
-                "start": start,
-                "end": end,
-                "rows_returned": 0,
-                "total_rows_in_sheet": len(df),
-                "csv": ""
-            }
+            return GetRowsCsvResponse(
+                status="success",
+                file_id=file_id,
+                sheet_number=sheet_number,
+                start=start,
+                end=end,
+                rows_returned=0,
+                total_rows_in_sheet=len(df),
+                csv=""
+            )
         
         # Slice the DataFrame
         df_slice = df.iloc[start:end]
@@ -422,16 +432,16 @@ def get_rows_csv(
         
         logger.info(f"CSV export: {len(df_slice)} rows from sheet {sheet_number} of file {file_id}")
         
-        return {
-            "status": "success",
-            "file_id": file_id,
-            "sheet_number": sheet_number,
-            "start": start,
-            "end": end,
-            "rows_returned": len(df_slice),
-            "total_rows_in_sheet": len(df),
-            "csv": csv_output
-        }
+        return GetRowsCsvResponse(
+            status="success",
+            file_id=file_id,
+            sheet_number=sheet_number,
+            start=start,
+            end=end,
+            rows_returned=len(df_slice),
+            total_rows_in_sheet=len(df),
+            csv=csv_output
+        )
         
     except Exception as e:
         logger.error(f"Failed to export CSV: {e}")
@@ -442,7 +452,7 @@ def get_rows_csv(
 def query_file(
     file_id: Annotated[str, Field(description="The Google Drive file ID to query")],
     sql_query: Annotated[str, Field(description="SQL query to execute. For Excel files with multiple sheets, use 'data_0', 'data_1', etc. as table names where the number is the sheet index. For single-sheet files (CSV or single-sheet Excel), use 'data' or 'data_0'")]
-) -> dict:
+) -> QueryFileResponse:
     """Execute SQL queries on a loaded file.
     
     Supports full SQL syntax (SELECT, WHERE, JOIN, GROUP BY, ORDER BY, LIMIT, etc.).
@@ -497,13 +507,13 @@ def query_file(
         
         # Return the result as a dictionary with specific structure
         if result.empty:
-            return {"status": "success", "columns": [], "rows": []}
+            return QueryFileResponse(status="success", columns=[], rows=[])
         
-        output = {
-            "status": "success",
-            "columns": result.columns.tolist(),
-            "rows": result.values.tolist()
-        }
+        output = QueryFileResponse(
+            status="success",
+            columns=result.columns.tolist(),
+            rows=result.values.tolist()
+        )
         
         logger.info(f"Query completed successfully: {rows_returned} rows returned")
         return output
