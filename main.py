@@ -42,6 +42,9 @@ else:
 
 logger = logging.getLogger(__name__)
 
+# Maximum rows to return from queries and CSV exports to prevent server overload
+MAX_ROWS = 100
+
 # Helper function to clear downloads folder
 def clear_downloads_folder():
     """Clear all files in the downloads folder"""
@@ -355,6 +358,10 @@ def get_rows_csv(
     
     For Excel files with multiple sheets, specify sheet_number (0-based index).
     
+    IMPORTANT: Maximum rows per CSV export is limited to 100 rows to prevent
+    server overload and context pollution. For larger datasets, make multiple calls
+    with different start/end ranges.
+    
     Example: start=0, end=10, sheet_number=0 returns the first 10 rows from sheet 0.
     """
     # Load the file into DataFrames if not already loaded
@@ -372,7 +379,7 @@ def get_rows_csv(
     
     try:
         # Validate start index
-        if start < 0 or start is None:
+        if start is None or start < 0:
             start = 0
         
         # Default end to number of rows if not specified
@@ -383,6 +390,17 @@ def get_rows_csv(
         if end > len(df):
             end = len(df)
         
+        # Calculate requested rows
+        requested_rows = end - start
+        
+        # Enforce maximum CSV export limit
+        if requested_rows > MAX_ROWS:
+            raise Exception(
+                f"Requested {requested_rows} rows exceeds maximum CSV export limit of {MAX_ROWS} rows. "
+                f"Please reduce the range or make multiple calls with smaller ranges. "
+                f"For example, use start={start}, end={start + 10} to get the first {10} rows."
+            )
+        
         # Ensure start is not after end
         if start >= end:
             return {
@@ -392,6 +410,7 @@ def get_rows_csv(
                 "start": start,
                 "end": end,
                 "rows_returned": 0,
+                "total_rows_in_sheet": len(df),
                 "csv": ""
             }
         
@@ -401,6 +420,8 @@ def get_rows_csv(
         # Convert to CSV
         csv_output = df_slice.to_csv(index=False)
         
+        logger.info(f"CSV export: {len(df_slice)} rows from sheet {sheet_number} of file {file_id}")
+        
         return {
             "status": "success",
             "file_id": file_id,
@@ -408,10 +429,12 @@ def get_rows_csv(
             "start": start,
             "end": end,
             "rows_returned": len(df_slice),
+            "total_rows_in_sheet": len(df),
             "csv": csv_output
         }
         
     except Exception as e:
+        logger.error(f"Failed to export CSV: {e}")
         raise Exception(f"Failed to export rows from file {file_id}, sheet {sheet_number} as CSV: {e}")
 
 
@@ -422,7 +445,7 @@ def query_file(
 ) -> dict:
     """Execute SQL queries on a loaded file.
     
-    Supports full SQL syntax (SELECT, WHERE, JOIN, GROUP BY, ORDER BY, etc.).
+    Supports full SQL syntax (SELECT, WHERE, JOIN, GROUP BY, ORDER BY, LIMIT, etc.).
     Results are returned as structured data with columns and rows arrays.
     Only read operations are supported.
 
@@ -433,7 +456,9 @@ def query_file(
     You can join multiple sheets: "SELECT * FROM data_0 JOIN data_1 ON data_0.id = data_1.id"
     
     Column names are case-sensitive and match the file's column headers.
-    Use LIMIT clause to control the number of returned rows.
+    
+    IMPORTANT: Queries that return more than 100 rows will be rejected with an error message.
+    Use WHERE clauses and LIMIT to narrow your results.
     """
     # Load the file into DataFrames if not already loaded
     if file_id not in loaded_files:
@@ -443,7 +468,6 @@ def query_file(
     
     try:
         # Use DuckDB to query the DataFrames
-        # Register each sheet as a table named 'data.N' where N is the sheet number
         conn = duckdb.connect(":memory:")
         
         for sheet_num, df in sheets_dict.items():
@@ -457,25 +481,35 @@ def query_file(
                 logger.info(f"Also registered sheet 0 as 'data' for backward compatibility")
         
         # Execute the query
+        logger.info(f"Executing query: {sql_query}")
         result = conn.execute(sql_query).fetchdf()
         
         # Close the connection
         conn.close()
         
+        # Check if result exceeds MAX_ROWS
+        rows_returned = len(result)
+        if rows_returned > MAX_ROWS:
+            raise Exception(
+                f"Query returned {rows_returned} rows, which exceeds the maximum of {MAX_ROWS} rows. "
+                f"Please narrow your search using WHERE clauses or add a LIMIT clause."
+            )
+        
         # Return the result as a dictionary with specific structure
         if result.empty:
             return {"status": "success", "columns": [], "rows": []}
         
-        # Create the output structure: {status, columns: [...], rows: [[...], ...]}
         output = {
             "status": "success",
             "columns": result.columns.tolist(),
             "rows": result.values.tolist()
         }
         
+        logger.info(f"Query completed successfully: {rows_returned} rows returned")
         return output
         
     except Exception as e:
+        logger.error(f"Query execution failed: {e}")
         raise Exception(f"Query execution failed on file {file_id}: {e}")
 
 
