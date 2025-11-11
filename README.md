@@ -47,87 +47,69 @@ uv run mcp dev main.py
 
 ## Available MCP Tools
 
-### `load_file`
-Download and load a file from Google Drive (background operation).
-
-**Parameters:**
-- `file_id` (string): The Google Drive file ID to download
-
-**Returns:** Dictionary with file_id, status, and message
-
-**Example:**
-```python
-load_file("1KliqOOx9hdU6fOJ0oQznuctvF3AphcJU")
-# → {file_id: "...", status: "downloading", message: "Download started..."}
-```
+All tools automatically download files from Google Drive when needed. Files are cached locally and automatically cleaned up after 10 minutes of inactivity by a background thread.
 
 ### `info`
-Get metadata about a loaded file's DataFrame structure.
+Get metadata about a file's DataFrame structure. Automatically downloads the file if not already cached.
 
 **Parameters:**
 - `file_id` (string): The Google Drive file ID
 
-**Returns:** Shape, columns, data types, null counts, memory usage
+**Returns:** Shape, columns, data types, null counts, memory usage, sheet information
 
 **Example:**
 ```python
 info("1KliqOOx9hdU6fOJ0oQznuctvF3AphcJU")
-# Returns: {status, file_id, shape: {rows, columns}, columns: [{name, dtype, non_null_count, null_count}], memory_usage_bytes}
+# Returns: {status, file_id, num_sheets, sheets: [{sheet_number, sheet_name, shape: {rows, columns}, columns: [{name, dtype, non_null_count, null_count}], memory_usage_bytes}], total_memory_usage_bytes}
 ```
 
 ### `get_rows_csv`
-Export rows from a loaded file as CSV format.
+Export rows from a file as CSV format. Automatically downloads the file if not already cached.
 
 **Parameters:**
 - `file_id` (string): The Google Drive file ID
 - `start` (int, optional): Starting row index (0-based, default: 0)
 - `end` (int, optional): Ending row index (exclusive, default: all rows)
+- `sheet_number` (int, optional): Sheet number for Excel files (0-based, default: 0)
 
-**Returns:** CSV string with specified rows
+**Returns:** CSV string with specified rows (max 100 rows per call)
 
 **Examples:**
 ```python
-# Get all rows
-get_rows_csv("1KliqOOx9hdU6fOJ0oQznuctvF3AphcJU")
+# Get first 10 rows from sheet 0
+get_rows_csv("1KliqOOx9hdU6fOJ0oQznuctvF3AphcJU", 0, 10)
 
-# Get first 100 rows
-get_rows_csv("1KliqOOx9hdU6fOJ0oQznuctvF3AphcJU", 0, 100)
-
-# Get rows 50-150
-get_rows_csv("1KliqOOx9hdU6fOJ0oQznuctvF3AphcJU", 50, 150)
+# Get rows 50-100 from sheet 1
+get_rows_csv("1KliqOOx9hdU6fOJ0oQznuctvF3AphcJU", 50, 100, 1)
 ```
 
 ### `query_file`
-Run SQL queries on loaded files using DuckDB.
+Run SQL queries on files using DuckDB. Automatically downloads the file if not already cached.
 
 **Parameters:**
 - `file_id` (string): The Google Drive file ID
-- `sql_query` (string): SQL query to execute (use 'data' as the table name)
+- `sql_query` (string): SQL query to execute (use 'data' or 'data_0' for single sheets, 'data_0', 'data_1', etc. for Excel files with multiple sheets)
 
-**Returns:** Query results with columns and rows
+**Returns:** Query results with columns and rows (max 100 rows per query)
 
 **Examples:**
 ```python
-# Select all rows
+# Select from single-sheet file or first sheet
 query_file("1KliqOOx9hdU6fOJ0oQznuctvF3AphcJU", "SELECT * FROM data LIMIT 10")
+
+# Query specific sheet in Excel file
+query_file("1KliqOOx9hdU6fOJ0oQznuctvF3AphcJU", "SELECT * FROM data_1 WHERE column1 > 100")
+
+# Join multiple sheets
+query_file("1KliqOOx9hdU6fOJ0oQznuctvF3AphcJU", "SELECT * FROM data_0 JOIN data_1 ON data_0.id = data_1.id")
 
 # Aggregation query
 query_file("1KliqOOx9hdU6fOJ0oQznuctvF3AphcJU", "SELECT column1, COUNT(*) as count FROM data GROUP BY column1")
-
-# Filter query
-query_file("1KliqOOx9hdU6fOJ0oQznuctvF3AphcJU", "SELECT * FROM data WHERE column1 > 100 ORDER BY column2 DESC")
 ```
 
-### `unload_file`
-Remove a downloaded file from local storage and clear from memory.
+## Automatic File Management
 
-**Parameters:**
-- `file_id` (string): The Google Drive file ID to unload
-
-**Returns:** Success message (idempotent - succeeds even if file doesn't exist)
-
-**Example:**
-```python
-unload_file("1KliqOOx9hdU6fOJ0oQznuctvF3AphcJU")
-# → "File 1KliqOOx9hdU6fOJ0oQznuctvF3AphcJU was unloaded successfully"
-```
+- **Auto-download:** Files are automatically downloaded from Google Drive when you call `info`, `get_rows_csv`, or `query_file`
+- **Caching:** Downloaded files are cached locally for performance
+- **Auto-cleanup:** A background thread removes files that haven't been accessed for 10 minutes
+- **Memory management:** DataFrames are loaded into memory on demand and tracked for cleanup

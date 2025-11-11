@@ -4,6 +4,8 @@ import shutil
 import logging
 from typing import Optional, Dict, Annotated
 from pathlib import Path
+from datetime import datetime, timedelta
+import threading
 
 import pandas as pd
 import duckdb
@@ -15,7 +17,6 @@ from src.config import get_settings
 from src.drive_client import DriveOperations
 from src.auth import setup_google_drive_client, GoogleDriveAuthError
 from src.models import (
-    LoadFileResponse,
     InfoResponse,
     GetRowsCsvResponse,
     QueryFileResponse,
@@ -87,8 +88,12 @@ mcp = FastMCP("tables-mcp-server")
 drive_ops: Optional[DriveOperations] = None
 
 # Global dictionary to store file data in memory
-# Structure: file_id -> {"dataframes": {sheet_num: DataFrame}, "sheet_names": {sheet_num: name}, "empty_sheets": [name1, name2]}
+# Structure: file_id -> {"dataframes": {sheet_num: DataFrame}, "sheet_names": {sheet_num: name}, "last_accessed": datetime}
 loaded_files: Dict[str, Dict] = {}
+
+# Cleanup configuration
+CLEANUP_INTERVAL_MINUTES = 10  # How often to run cleanup
+INACTIVITY_THRESHOLD_MINUTES = 10  # How long before a file is considered inactive
 
 
 def get_drive_operations() -> DriveOperations:
@@ -106,6 +111,112 @@ def get_drive_operations() -> DriveOperations:
     return drive_ops
 
 
+def update_file_access_time(file_id: str) -> None:
+    """Update the last accessed timestamp for a file"""
+    if file_id in loaded_files:
+        loaded_files[file_id]["last_accessed"] = datetime.now()
+        logger.debug(f"Updated last access time for file {file_id}")
+
+
+def cleanup_inactive_files() -> None:
+    """Remove files and dataframes that haven't been accessed for over INACTIVITY_THRESHOLD_MINUTES"""
+    try:
+        cutoff_time = datetime.now() - timedelta(minutes=INACTIVITY_THRESHOLD_MINUTES)
+        files_to_remove = []
+        
+        # Find files that haven't been accessed recently
+        for file_id, file_data in loaded_files.items():
+            last_accessed = file_data.get("last_accessed")
+            if last_accessed and last_accessed < cutoff_time:
+                files_to_remove.append(file_id)
+        
+        # Remove inactive files
+        if files_to_remove:
+            logger.info(f"Cleaning up {len(files_to_remove)} inactive file(s): {files_to_remove}")
+            for file_id in files_to_remove:
+                try:
+                    # Remove from memory
+                    num_sheets = len(loaded_files[file_id]["dataframes"])
+                    del loaded_files[file_id]
+                    logger.info(f"Removed {num_sheets} sheet(s) for file {file_id} from memory")
+                    
+                    # Remove from disk
+                    download_dir = settings.get_download_directory_path()
+                    matching_files = list(download_dir.glob(f"{file_id}.*"))
+                    for file_path in matching_files:
+                        file_path.unlink()
+                        logger.info(f"Deleted file: {file_path}")
+                    
+                    logger.info(f"Successfully cleaned up inactive file: {file_id}")
+                except Exception as e:
+                    logger.error(f"Error cleaning up file {file_id}: {e}")
+        else:
+            logger.debug("No inactive files to clean up")
+            
+    except Exception as e:
+        logger.error(f"Error during cleanup: {e}")
+
+
+def periodic_cleanup() -> None:
+    """Run cleanup periodically in the background"""
+    cleanup_inactive_files()
+    # Schedule next cleanup
+    timer = threading.Timer(CLEANUP_INTERVAL_MINUTES * 60, periodic_cleanup)
+    timer.daemon = True
+    timer.start()
+    logger.debug(f"Next cleanup scheduled in {CLEANUP_INTERVAL_MINUTES} minutes")
+
+
+def ensure_file_downloaded(file_id: str) -> None:
+    """Ensure a file is downloaded from Google Drive if not already present locally.
+    
+    Args:
+        file_id: The Google Drive file ID to download if needed
+        
+    Raises:
+        Exception: If the file cannot be downloaded
+    """
+    download_dir = settings.get_download_directory_path()
+    matching_files = list(download_dir.glob(f"{file_id}.*"))
+    
+    # If file already exists locally, no need to download
+    if matching_files:
+        logger.info(f"File {file_id} already exists locally: {matching_files[0]}")
+        return
+    
+    # File not found locally, download from Google Drive
+    logger.info(f"File {file_id} not found locally, downloading from Google Drive...")
+    
+    # Validate file exists on Google Drive
+    try:
+        ops = get_drive_operations()
+        exists, error_message = ops.check_file_exists(file_id)
+        if not exists:
+            logger.error(f"File {file_id} does not exist on Google Drive: {error_message}")
+            raise Exception(f"{error_message}")
+        logger.info(f"File {file_id} exists on Google Drive")
+    except Exception as e:
+        logger.error(f"Error checking file existence: {e}")
+        raise
+    
+    # Download the file
+    try:
+        logger.info(f"Starting download for file {file_id}...")
+        ops.download_file_by_id(file_id)
+        logger.info(f"File {file_id} downloaded successfully")
+        
+        # Verify the file was actually downloaded
+        matching_files = list(download_dir.glob(f"{file_id}.*"))
+        if matching_files:
+            logger.info(f"Download verified: {matching_files[0]} (size: {matching_files[0].stat().st_size} bytes)")
+        else:
+            logger.error(f"Download completed but file not found in {download_dir}")
+            raise Exception(f"File {file_id} download failed: file not found after download")
+    except Exception as e:
+        logger.error(f"Failed to download file {file_id}: {e}")
+        raise Exception(f"Failed to download file {file_id}: {e}")
+
+
 def load_dataframe_from_file(file_id: str) -> Dict:
     """Load a downloaded file into pandas DataFrames (one per sheet for Excel files).
     
@@ -116,8 +227,7 @@ def load_dataframe_from_file(file_id: str) -> Dict:
         Dictionary with structure:
         {
             "dataframes": {sheet_num: DataFrame, ...},
-            "sheet_names": {sheet_num: name, ...},
-            "empty_sheets": [name1, name2, ...]
+            "sheet_names": {sheet_num: name, ...}
         }
         
     Raises:
@@ -130,7 +240,7 @@ def load_dataframe_from_file(file_id: str) -> Dict:
     
     if not matching_files:
         logger.error(f"File {file_id} not found locally in {download_dir}")
-        raise Exception(f"File {file_id} not found locally. Call load_file() first to download it.")
+        raise Exception(f"File {file_id} not found locally after download attempt")
     
     file_path = matching_files[0]
     extension = file_path.suffix.lower()
@@ -147,7 +257,6 @@ def load_dataframe_from_file(file_id: str) -> Dict:
             
             sheets_dict = {}
             sheet_names_dict = {}
-            empty_sheets = []
             new_index = 0  # Sequential index for non-empty sheets
             
             for idx, sheet_name in enumerate(sheet_names):
@@ -157,7 +266,6 @@ def load_dataframe_from_file(file_id: str) -> Dict:
                 # Skip empty sheets (0 columns)
                 if df.shape[1] == 0:
                     logger.warning(f"Skipping empty sheet {idx} '{sheet_name}' - 0 columns")
-                    empty_sheets.append(sheet_name)
                     continue
                 
                 sheets_dict[new_index] = df
@@ -170,13 +278,11 @@ def load_dataframe_from_file(file_id: str) -> Dict:
                 raise Exception(f"All sheets in file {file_id} are empty (0 columns). Cannot load file.")
             
             logger.info(f"Successfully loaded {len(sheets_dict)} non-empty sheets from {file_id}")
-            if empty_sheets:
-                logger.info(f"Skipped {len(empty_sheets)} empty sheets: {empty_sheets}")
             
             return {
                 "dataframes": sheets_dict,
                 "sheet_names": sheet_names_dict,
-                "empty_sheets": empty_sheets
+                "last_accessed": datetime.now()
             }
         elif extension == '.csv':
             # CSV files only have one "sheet" (sheet 0)
@@ -186,7 +292,7 @@ def load_dataframe_from_file(file_id: str) -> Dict:
             return {
                 "dataframes": {0: df},
                 "sheet_names": {0: file_path.stem},  # Use filename as sheet name
-                "empty_sheets": []
+                "last_accessed": datetime.now()
             }
         else:
             logger.error(f"Unsupported file type '{extension}' for file {file_id}")
@@ -199,93 +305,8 @@ def load_dataframe_from_file(file_id: str) -> Dict:
 
 # MCP Tool Definitions
 @mcp.tool()
-def load_file(file_id: Annotated[str, Field(description="The Google Drive file ID to download and load into memory")]) -> LoadFileResponse:
-    """Download a file from Google Drive and load it into memory for analysis.
-    
-    Supports Excel files (.xlsx, .xls), CSV files (.csv), and Google Sheets.
-    Must be called before any other operations on the file.
-    """
-    logger.info(f"load_file called for file_id: {file_id}")
-    
-    # Check if already loaded
-    if file_id in loaded_files:
-        logger.info(f"File {file_id} is already loaded in memory")
-        return LoadFileResponse(
-            file_id=file_id,
-            status="already loaded",
-            message="File is already loaded and ready to use."
-        )
-    
-    # Validate file exists on Google Drive
-    try:
-        logger.info(f"Checking if file {file_id} exists on Google Drive...")
-        ops = get_drive_operations()
-        exists, error_message = ops.check_file_exists(file_id)
-        if not exists:
-            logger.error(f"File {file_id} does not exist on Google Drive: {error_message}")
-            raise Exception(f"{error_message}")
-        logger.info(f"File {file_id} exists on Google Drive")
-    except Exception as e:
-        logger.error(f"Error checking file existence: {e}")
-        raise
-    
-    # Download the file synchronously
-    try:
-        logger.info(f"Starting download for file {file_id}...")
-        ops.download_file_by_id(file_id)
-        logger.info(f"File {file_id} downloaded successfully")
-        
-        # Verify the file was actually downloaded
-        download_dir = settings.get_download_directory_path()
-        matching_files = list(download_dir.glob(f"{file_id}.*"))
-        if matching_files:
-            logger.info(f"Download verified: {matching_files[0]} (size: {matching_files[0].stat().st_size} bytes)")
-        else:
-            logger.warning(f"Download completed but file not found in {download_dir}")
-        
-        return LoadFileResponse(
-            file_id=file_id,
-            status="success",
-            message="File downloaded successfully and ready to use."
-        )
-    except Exception as e:
-        logger.error(f"Failed to download file {file_id}: {e}")
-        raise Exception(f"Failed to download file {file_id}: {e}")
-
-
-@mcp.tool()
-def unload_file(file_id: Annotated[str, Field(description="The Google Drive file ID to remove from local storage and memory")]) -> str:
-    """Remove a file from local storage and free up memory.
-    
-    Does not affect the original file in Google Drive.
-    """
-    logger.info(f"unload_file called for file_id: {file_id}")
-    download_dir = settings.get_download_directory_path()
-    
-    # Clear file data from memory
-    if file_id in loaded_files:
-        num_sheets = len(loaded_files[file_id]["dataframes"])
-        del loaded_files[file_id]
-        logger.info(f"Removed {num_sheets} sheet(s) for file {file_id} from memory")
-    
-    # Look for file with this ID (could have various extensions)
-    matching_files = list(download_dir.glob(f"{file_id}.*"))
-    
-    if not matching_files:
-        logger.info(f"No files found to delete for {file_id}")
-        return f"file {file_id} was unloaded."
-    
-    for file_path in matching_files:
-        logger.info(f"Deleting file: {file_path}")
-        file_path.unlink()
-    
-    logger.info(f"File {file_id} unloaded successfully")
-    return f"file {file_id} was unloaded."
-
-
-@mcp.tool()
-def info(file_id: Annotated[str, Field(description="The Google Drive file ID to retrieve information about")]) -> InfoResponse:
-    """Get metadata and statistics about a loaded file.
+def info(file_id: Annotated[str, Field(description="The Google Drive file ID to retrieve information about")]) -> InfoResponse | dict:
+    """Get metadata and statistics about a file.
     
     Returns shape (rows and columns), column names with data types,
     and null/non-null counts for each column. For Excel files with multiple sheets,
@@ -295,15 +316,48 @@ def info(file_id: Annotated[str, Field(description="The Google Drive file ID to 
     """
     logger.info(f"info called for file_id: {file_id}")
     
+    # Hidden debug feature: Get all loaded files
+    if file_id == "GETALLFILES":
+        logger.info("Debug command: GETALLFILES")
+        
+        debug_data = []
+        for fid, fdata in loaded_files.items():
+            file_info = {
+                "file_id": fid,
+                "sheet_names": fdata["sheet_names"],
+                "last_accessed": fdata["last_accessed"].isoformat()
+            }
+            debug_data.append(file_info)
+            logger.info(f"Debug: {file_info}")
+        
+        # Return as dict (not following schema)
+        return {"status": "debug", "files": debug_data, "total_files": len(loaded_files)}
+    
+    # Hidden debug feature: Master refresh - clear all files and dataframes
+    if file_id == "MASTERREFRESH":
+        logger.info("Debug command: MASTERREFRESH - clearing all files and dataframes")
+        files_cleared = len(loaded_files)
+        loaded_files.clear()
+        clear_downloads_folder()
+        logger.info(f"Cleared {files_cleared} files from memory and downloads folder")
+        
+        # Return as dict (not following schema)
+        return {"status": "refreshed", "files_cleared": files_cleared, "message": "All files and dataframes cleared"}
+    
+    # Ensure file is downloaded from Google Drive
+    ensure_file_downloaded(file_id)
+    
     # Load the file into DataFrames if not already loaded
     if file_id not in loaded_files:
         logger.info(f"File {file_id} not in memory, loading from disk...")
         loaded_files[file_id] = load_dataframe_from_file(file_id)
     
+    # Update access time
+    update_file_access_time(file_id)
+    
     file_data = loaded_files[file_id]
     sheets_dict = file_data["dataframes"]
     sheet_names = file_data["sheet_names"]
-    empty_sheets = file_data["empty_sheets"]
     
     try:
         # Gather information for each sheet
@@ -360,7 +414,7 @@ def get_rows_csv(
     end: Annotated[int | None, Field(description="Ending row index (exclusive). If not specified, returns all rows from start")] = None,
     sheet_number: Annotated[int, Field(description="Sheet number to retrieve rows from (0-based index). Defaults to 0")] = 0
 ) -> GetRowsCsvResponse:
-    """Retrieve a range of rows from a loaded file as CSV-formatted text.
+    """Retrieve a range of rows from a file as CSV-formatted text.
     
     Returns rows as CSV with column headers. Uses zero-based indexing where
     end is exclusive (like Python slicing). If start or end is not specified, returns
@@ -374,9 +428,15 @@ def get_rows_csv(
     
     Example: start=0, end=10, sheet_number=0 returns the first 10 rows from sheet 0.
     """
+    # Ensure file is downloaded from Google Drive
+    ensure_file_downloaded(file_id)
+    
     # Load the file into DataFrames if not already loaded
     if file_id not in loaded_files:
         loaded_files[file_id] = load_dataframe_from_file(file_id)
+    
+    # Update access time
+    update_file_access_time(file_id)
     
     sheets_dict = loaded_files[file_id]["dataframes"]
     
@@ -453,7 +513,7 @@ def query_file(
     file_id: Annotated[str, Field(description="The Google Drive file ID to query")],
     sql_query: Annotated[str, Field(description="SQL query to execute. For Excel files with multiple sheets, use 'data_0', 'data_1', etc. as table names where the number is the sheet index. For single-sheet files (CSV or single-sheet Excel), use 'data' or 'data_0'")]
 ) -> QueryFileResponse:
-    """Execute SQL queries on a loaded file.
+    """Execute SQL queries on a file.
     
     Supports full SQL syntax (SELECT, WHERE, JOIN, GROUP BY, ORDER BY, LIMIT, etc.).
     Results are returned as structured data with columns and rows arrays.
@@ -470,9 +530,15 @@ def query_file(
     IMPORTANT: Queries that return more than 100 rows will be rejected with an error message.
     Use WHERE clauses and LIMIT to narrow your results.
     """
+    # Ensure file is downloaded from Google Drive
+    ensure_file_downloaded(file_id)
+    
     # Load the file into DataFrames if not already loaded
     if file_id not in loaded_files:
         loaded_files[file_id] = load_dataframe_from_file(file_id)
+    
+    # Update access time
+    update_file_access_time(file_id)
     
     sheets_dict = loaded_files[file_id]["dataframes"]
     
@@ -525,6 +591,10 @@ def query_file(
 
 if __name__ == "__main__":
     try:
+        # Start periodic cleanup in background
+        logger.info(f"Starting periodic cleanup (every {CLEANUP_INTERVAL_MINUTES} minutes, files inactive for {INACTIVITY_THRESHOLD_MINUTES} minutes will be removed)")
+        periodic_cleanup()
+        
         # Run the MCP server
         mcp.run()
     except KeyboardInterrupt:
