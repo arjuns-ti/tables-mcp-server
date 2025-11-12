@@ -97,13 +97,9 @@ class DriveOperations:
         if self.settings.max_file_size_mb > 0 and file_size > max_size_bytes:
             raise Exception(f"File size ({file_size} bytes) exceeds maximum allowed size ({max_size_bytes} bytes)")
         
-        # Build download request parameters
-        download_params = {'fileId': file_id}
-        if self.settings.enable_shared_drives:
-            download_params['supportsAllDrives'] = True
-        
         # Download file with larger chunk size for faster downloads
-        request = self.service.files().get_media(**download_params)
+        # Note: get_media() does not support supportsAllDrives parameter
+        request = self.service.files().get_media(fileId=file_id)
         
         with open(destination_path, 'wb') as f:
             # Use 10MB chunk size for faster downloads (default is 256KB)
@@ -136,16 +132,12 @@ class DriveOperations:
         Raises:
             Exception: If export fails
         """
-        # Build export request parameters
-        export_params = {
-            'fileId': file_id,
-            'mimeType': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
-        }
-        if self.settings.enable_shared_drives:
-            export_params['supportsAllDrives'] = True
-        
         # Export the file with larger chunk size for faster downloads
-        request = self.service.files().export_media(**export_params)
+        # Note: export_media() does not support supportsAllDrives parameter in some API versions
+        request = self.service.files().export_media(
+            fileId=file_id,
+            mimeType='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+        )
         
         with open(destination_path, 'wb') as f:
             # Use 10MB chunk size for faster downloads (default is 256KB)
