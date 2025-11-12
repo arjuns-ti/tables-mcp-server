@@ -413,6 +413,12 @@ def info(file_id: Annotated[str, Field(description="The Google Drive file ID to 
         )
         
         logger.info(f"Successfully retrieved info for file {file_id}: {len(sheets_dict)} sheet(s)")
+        
+        # Unload dataframe from memory but keep the file on disk
+        if file_id in loaded_files:
+            del loaded_files[file_id]
+            logger.info(f"Unloaded dataframe for file {file_id} from memory")
+        
         return info_response
         
     except Exception as e:
@@ -505,7 +511,7 @@ def get_rows_csv(
         
         logger.info(f"CSV export: {len(df_slice)} rows from sheet {sheet_number} of file {file_id}")
         
-        return GetRowsCsvResponse(
+        response = GetRowsCsvResponse(
             status="success",
             file_id=file_id,
             sheet_number=sheet_number,
@@ -515,6 +521,13 @@ def get_rows_csv(
             total_rows_in_sheet=len(df),
             csv=csv_output
         )
+        
+        # Unload dataframe from memory but keep the file on disk
+        if file_id in loaded_files:
+            del loaded_files[file_id]
+            logger.info(f"Unloaded dataframe for file {file_id} from memory")
+        
+        return response
         
     except Exception as e:
         logger.error(f"Failed to export CSV: {e}")
@@ -586,15 +599,21 @@ def query_file(
         
         # Return the result as a dictionary with specific structure
         if result.empty:
-            return QueryFileResponse(status="success", columns=[], rows=[])
-        
-        output = QueryFileResponse(
-            status="success",
-            columns=result.columns.tolist(),
-            rows=result.values.tolist()
-        )
+            output = QueryFileResponse(status="success", columns=[], rows=[])
+        else:
+            output = QueryFileResponse(
+                status="success",
+                columns=result.columns.tolist(),
+                rows=result.values.tolist()
+            )
         
         logger.info(f"Query completed successfully: {rows_returned} rows returned")
+        
+        # Unload dataframe from memory but keep the file on disk
+        if file_id in loaded_files:
+            del loaded_files[file_id]
+            logger.info(f"Unloaded dataframe for file {file_id} from memory")
+        
         return output
         
     except Exception as e:
